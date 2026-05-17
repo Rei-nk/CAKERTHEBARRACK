@@ -1,6 +1,7 @@
 {
   "name": "thebarrack-bot",
   "version": "1.0.0",
+  "type": "module",
   "dependencies": {
     "google-auth-library": "^9.10.0",
     "google-spreadsheet": "^4.1.1"
