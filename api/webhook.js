@@ -72,23 +72,60 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------------------
-    // TAHAP 4: MATA DEWA (Terima Foto) -> Gak butuh buka Sheets
+    // TAHAP 4: MATA DEWA (Terima Foto di DM & Ekstrak Nomor DANA)
     // ---------------------------------------------------------
     if (body.message && body.message.photo && body.message.chat.type === 'private') {
       const chatId = body.message.chat.id;
       const userId = body.message.from.id;
       const username = body.message.from.username || body.message.from.first_name;
       const fileId = body.message.photo[body.message.photo.length - 1].file_id;
+      
+      // Ambil teks caption di bawah foto (kalau ada)
+      const captionText = body.message.caption ? body.message.caption.trim() : '';
 
-      await sendTelegramMsg(chatId, `✅ **BUKTI DITERIMA!**\n\nSetoran lu udah masuk ke meja "Mata Dewa". Tunggu notifikasi lulus/gagalnya di sini.`);
+      await doc.loadInfo();
+      const sheetFinance = doc.sheetsByTitle["Finance & Payout"];
+      const rows = await sheetFinance.getRows();
+      let workerRow = rows.find(r => r.get('Worker_ID') === userId.toString());
 
+      let notifDana = '';
+
+      // Cek apakah ada tulisan caption dan isinya beneran angka nomor HP DANA
+      if (captionText && !isNaN(captionText) && captionText.length >= 10) {
+        if (workerRow) {
+          // Kalau data worker udah ada, update nomor DANA nya
+          workerRow.set('Nomor DANA', captionText);
+          await workerRow.save();
+        } else {
+          // Kalau belum ada, bikin baris baru dengan saldo 0 dulu (nanti nambah pas di-approve)
+          await sheetFinance.addRow({
+            'Worker_ID': userId.toString(),
+            'Nama Worker': username,
+            'Total Saldo': 0,
+            'Nomor DANA': captionText
+          });
+        }
+        notifDana = `\n\n📌 **E-Wallet Terdeteksi:** Nomor DANA **${captionText}** berhasil dicatat/diperbarui!`;
+      } else {
+        notifDana = `\n\n⚠️ *Catatan: Lu gak melampirkan nomor DANA di caption foto. Pastiin nomor lu udah terdaftar lewat /setdana biar gak telat gajian.*`;
+      }
+
+      // Kirim konfirmasi ke Worker
+      await sendTelegramMsg(chatId, `✅ **BUKTI DITERIMA!**\n\nSetoran lu udah masuk ke meja "Mata Dewa". Tunggu notifikasi lulus/gagalnya di sini.${notifDana}`);
+
+      // Ambil ulang data nomor DANA terupdate untuk ditampilkan ke Admin Validasi
+      const currentRows = await sheetFinance.getRows();
+      const currentWorker = currentRows.find(r => r.get('Worker_ID') === userId.toString());
+      const nomorDanaTerdaftar = currentWorker ? currentWorker.get('Nomor DANA') : (captionText || '-');
+
+      // Kirim ke Dashboard Validasi Admin
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: VALIDATION_ID,
           photo: fileId,
-          caption: `📸 **SETORAN BARU**\nWorker: @${username}\nID Worker: ${userId}\n\nEksekusi, Bos!`,
+          caption: `📸 **SETORAN BARU**\nWorker: @${username}\nID Worker: ${userId}\n📱 No. DANA: \`${nomorDanaTerdaftar}\`\n\nEksekusi, Bos!`,
           parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: [
