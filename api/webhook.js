@@ -72,7 +72,7 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------------------
-    // TAHAP 4: MATA DEWA (Terima Foto di DM & Ekstrak Nomor DANA)
+    // TAHAP 4: MATA DEWA (Terima Foto di DM & Ekstrak Nomor DANA - PATCHED)
     // ---------------------------------------------------------
     if (body.message && body.message.photo && body.message.chat.type === 'private') {
       const chatId = body.message.chat.id;
@@ -80,8 +80,11 @@ export default async function handler(req, res) {
       const username = body.message.from.username || body.message.from.first_name;
       const fileId = body.message.photo[body.message.photo.length - 1].file_id;
       
-      // Ambil teks caption di bawah foto (kalau ada)
-      const captionText = body.message.caption ? body.message.caption.trim() : '';
+      // 1. Ambil teks caption dan bersihin spasi di ujung-ujung
+      let rawCaption = body.message.caption ? body.message.caption.trim() : '';
+      
+      // 2. Bersihin karakter aneh (spasi di tengah, strip, atau tanda titik) biar murni angka
+      let cleanNumber = rawCaption.replace(/[^0-9]/g, ''); 
 
       await doc.loadInfo();
       const sheetFinance = doc.sheetsByTitle["Finance & Payout"];
@@ -89,34 +92,38 @@ export default async function handler(req, res) {
       let workerRow = rows.find(r => r.get('Worker_ID') === userId.toString());
 
       let notifDana = '';
+      let nomorDanaFix = '-';
 
-      // Cek apakah ada tulisan caption dan isinya beneran angka nomor HP DANA
-      if (captionText && !isNaN(captionText) && captionText.length >= 10) {
+      // 3. Validasi: minimal 10 digit angka setelah dibersihkan
+      if (cleanNumber && cleanNumber.length >= 10) {
+        nomorDanaFix = cleanNumber; // Gunakan nomor yang udah bersih
+
         if (workerRow) {
           // Kalau data worker udah ada, update nomor DANA nya
-          workerRow.set('Nomor DANA', captionText);
+          workerRow.set('Nomor DANA', nomorDanaFix);
           await workerRow.save();
         } else {
-          // Kalau belum ada, bikin baris baru dengan saldo 0 dulu (nanti nambah pas di-approve)
+          // Kalau belum ada, bikin baris baru dengan saldo 0 dulu
           await sheetFinance.addRow({
             'Worker_ID': userId.toString(),
             'Nama Worker': username,
             'Total Saldo': 0,
-            'Nomor DANA': captionText
+            'Nomor DANA': nomorDanaFix
           });
         }
-        notifDana = `\n\n📌 **E-Wallet Terdeteksi:** Nomor DANA **${captionText}** berhasil dicatat/diperbarui!`;
+        notifDana = `\n\n📌 **E-Wallet Terdeteksi:** Nomor DANA **${nomorDanaFix}** berhasil dicatat!`;
       } else {
-        notifDana = `\n\n⚠️ *Catatan: Lu gak melampirkan nomor DANA di caption foto. Pastiin nomor lu udah terdaftar lewat /setdana biar gak telat gajian.*`;
+        // Jika tidak ada nomor valid di caption, cek apakah di database lawas udah pernah daftar
+        if (workerRow && workerRow.get('Nomor DANA') && workerRow.get('Nomor DANA') !== '-') {
+          nomorDanaFix = workerRow.get('Nomor DANA');
+          notifDana = `\n\n📱 *Menggunakan nomor DANA terdaftar: ${nomorDanaFix}*`;
+        } else {
+          notifDana = `\n\n⚠️ *Catatan: Nomor DANA tidak terdeteksi di caption foto. Pastiin ketik nomor HP DANA lu dengan benar di caption!*`;
+        }
       }
 
       // Kirim konfirmasi ke Worker
       await sendTelegramMsg(chatId, `✅ **BUKTI DITERIMA!**\n\nSetoran lu udah masuk ke meja "Mata Dewa". Tunggu notifikasi lulus/gagalnya di sini.${notifDana}`);
-
-      // Ambil ulang data nomor DANA terupdate untuk ditampilkan ke Admin Validasi
-      const currentRows = await sheetFinance.getRows();
-      const currentWorker = currentRows.find(r => r.get('Worker_ID') === userId.toString());
-      const nomorDanaTerdaftar = currentWorker ? currentWorker.get('Nomor DANA') : (captionText || '-');
 
       // Kirim ke Dashboard Validasi Admin
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
@@ -125,7 +132,7 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           chat_id: VALIDATION_ID,
           photo: fileId,
-          caption: `📸 **SETORAN BARU**\nWorker: @${username}\nID Worker: ${userId}\n📱 No. DANA: \`${nomorDanaTerdaftar}\`\n\nEksekusi, Bos!`,
+          caption: `📸 **SETORAN BARU**\nWorker: @${username}\nID Worker: ${userId}\n📱 No. DANA: \`${nomorDanaFix}\`\n\nEksekusi, Bos!`,
           parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: [
