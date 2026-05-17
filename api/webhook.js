@@ -147,34 +147,16 @@ export default async function handler(req, res) {
       return res.status(200).send('OK');
     }
 
-    // ---------------------------------------------------------
-    // TAHAP 3: EKSEKUSI (Klik Ambil Tugas) -> Butuh buka Sheets
-    // ---------------------------------------------------------
-    if (body.callback_query && body.callback_query.data.startsWith('claim_')) {
-      const callback = body.callback_query;
-      const orderId = callback.data.replace('claim_', '');
-      const userId = callback.from.id.toString();
-      const callbackId = callback.id;
-      const msgId = callback.message.message_id;
-      const chatGroupId = callback.message.chat.id;
-
-      await doc.loadInfo(); // Panggil Sheets HANYA SAAT DIBUTUHKAN
-
-      const sheetScript = doc.sheetsByTitle["Master Scripting"];
-      const rows = await sheetScript.getRows();
-      
-      const availableRow = rows.find(r => r.get('ID Order') === orderId && r.get('Status') === 'Tersedia');
-
-      if (availableRow) {
-        const scriptId = availableRow.get('ID Script');
-        const scriptText = availableRow.get('Teks Komentar');
-        
-        availableRow.set('Status', 'Diambil');
+    availableRow.set('Status', 'Diambil');
         availableRow.set('Worker_ID', userId);
-        await availableRow.save();
+        await availableRow.save(); // 1. Save data baris pertama
 
-        const sisaRows = rows.filter(r => r.get('ID Order') === orderId && r.get('Status') === 'Tersedia');
-        const sisaKuota = sisaRows.length - 1; 
+        // 🔥 PATCH: Ambil ulang data baris terbaru dari Sheets buat ngatasin DELAY SYNC
+        const updatedRows = await sheetScript.getRows();
+        
+        // Hitung sisa kuota yang BENERAN masih "Tersedia" saat ini
+        const sisaRows = updatedRows.filter(r => r.get('ID Order') === orderId && r.get('Status') === 'Tersedia');
+        const sisaKuota = sisaRows.length; // Gak perlu dikurang 1 lagi karena datanya udah terupdate riil!
 
         await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
           method: 'POST',
@@ -182,9 +164,11 @@ export default async function handler(req, res) {
           body: JSON.stringify({ callback_query_id: callbackId, text: "Berhasil dapat kuota! Cek DM Bot sekarang.", show_alert: true })
         });
 
-        await sendTelegramMsg(userId, `🔥 **Tugas Diterima!**\n\nTugas Komentar Lo: \n_"${scriptText}"_ \n(Script ID: ${scriptId})\n\nBalas pesan ini dengan SCREENSHOT bukti komen lo!`);
+        await sendTelegramMsg(userId, `🔥 **Tugas Diterima!**\n\nTugas Komentar Lo: \n_"${scriptText}"_ \n(Script ID: ${scriptId})\n\nBalas pesan ini dengan SCREENSHOT bukti komen lo!\n\nJangan lupa daftarin nomor DANA lu ketik: \n\`/setdana [NOMOR_HP]\``);
 
+        // Tombol berubah HABIS cuma kalau sisaKuota beneran 0
         const buttonText = sisaKuota > 0 ? `[ AMBIL TUGAS | Sisa Kuota: ${sisaKuota} ]` : `[ TUGAS HABIS ❌ ]`;
+        
         await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageReplyMarkup`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -196,16 +180,6 @@ export default async function handler(req, res) {
             }
           })
         });
-
-      } else {
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ callback_query_id: callbackId, text: "Telat bos! Kuota udah habis.", show_alert: true })
-        });
-      }
-      return res.status(200).send('OK');
-    }
 
     // ---------------------------------------------------------
     // TAHAP 5: VALIDASI (Klik Approve/Reject) -> Butuh buka Sheets
