@@ -34,7 +34,7 @@ export default async function handler(req, res) {
     const body = req.body;
 
     // ---------------------------------------------------------
-    // TAHAP 2: ORKESTRASI (/runtask) -> Gak butuh buka Sheets
+    // TAHAP 2: ORKESTRASI (/runtask)
     // ---------------------------------------------------------
     if (body.message && body.message.text && body.message.text.startsWith('/runtask')) {
       const chatId = body.message.chat.id;
@@ -72,7 +72,72 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------------------
-    // TAHAP 4: MATA DEWA (Terima Foto di DM & Ekstrak Nomor DANA - PATCHED)
+    // TAHAP 3: EKSEKUSI PASUKAN (Klik Ambil Tugas)
+    // ---------------------------------------------------------
+    if (body.callback_query && body.callback_query.data.startsWith('claim_')) {
+      const callback = body.callback_query;
+      const orderId = callback.data.replace('claim_', '');
+      const userId = callback.from.id.toString();
+      const callbackId = callback.id;
+      const msgId = callback.message.message_id;
+      const chatGroupId = callback.message.chat.id;
+
+      await doc.loadInfo(); 
+
+      const sheetScript = doc.sheetsByTitle["Master Scripting"];
+      const rows = await sheetScript.getRows();
+      
+      const availableRow = rows.find(r => r.get('ID Order') === orderId && r.get('Status') === 'Tersedia');
+
+      if (availableRow) {
+        const scriptId = availableRow.get('ID Script');
+        const scriptText = availableRow.get('Teks Komentar');
+        
+        availableRow.set('Status', 'Diambil');
+        availableRow.set('Worker_ID', userId);
+        await availableRow.save(); // 1. Save data baris pertama
+
+        // Ambil ulang data baris terbaru dari Sheets buat ngatasin DELAY SYNC
+        const updatedRows = await sheetScript.getRows();
+        
+        // Hitung sisa kuota yang BENERAN masih "Tersedia" saat ini
+        const sisaRows = updatedRows.filter(r => r.get('ID Order') === orderId && r.get('Status') === 'Tersedia');
+        const sisaKuota = sisaRows.length; 
+
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback_query_id: callbackId, text: "Berhasil dapat kuota! Cek DM Bot sekarang.", show_alert: true })
+        });
+
+        await sendTelegramMsg(userId, `🔥 **Tugas Diterima!**\n\nTugas Komentar Lo: \n_"${scriptText}"_ \n(Script ID: ${scriptId})\n\nBalas pesan ini dengan SCREENSHOT bukti komen lo!\n\nJangan lupa tulis nomor DANA lu di caption foto biar otomatis kedaftar!`);
+
+        const buttonText = sisaKuota > 0 ? `[ AMBIL TUGAS | Sisa Kuota: ${sisaKuota} ]` : `[ TUGAS HABIS ❌ ]`;
+        
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageReplyMarkup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatGroupId,
+            message_id: msgId,
+            reply_markup: {
+              inline_keyboard: [[ { text: buttonText, callback_data: sisaKuota > 0 ? `claim_${orderId}` : `habis` } ]]
+            }
+          })
+        });
+
+      } else {
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback_query_id: callbackId, text: "Telat bos! Kuota udah habis.", show_alert: true })
+        });
+      }
+      return res.status(200).send('OK');
+    }
+
+    // ---------------------------------------------------------
+    // TAHAP 4: MATA DEWA (Terima Foto di DM & Ekstrak Nomor DANA)
     // ---------------------------------------------------------
     if (body.message && body.message.photo && body.message.chat.type === 'private') {
       const chatId = body.message.chat.id;
@@ -80,10 +145,7 @@ export default async function handler(req, res) {
       const username = body.message.from.username || body.message.from.first_name;
       const fileId = body.message.photo[body.message.photo.length - 1].file_id;
       
-      // 1. Ambil teks caption dan bersihin spasi di ujung-ujung
       let rawCaption = body.message.caption ? body.message.caption.trim() : '';
-      
-      // 2. Bersihin karakter aneh (spasi di tengah, strip, atau tanda titik) biar murni angka
       let cleanNumber = rawCaption.replace(/[^0-9]/g, ''); 
 
       await doc.loadInfo();
@@ -94,16 +156,13 @@ export default async function handler(req, res) {
       let notifDana = '';
       let nomorDanaFix = '-';
 
-      // 3. Validasi: minimal 10 digit angka setelah dibersihkan
       if (cleanNumber && cleanNumber.length >= 10) {
-        nomorDanaFix = cleanNumber; // Gunakan nomor yang udah bersih
+        nomorDanaFix = cleanNumber; 
 
         if (workerRow) {
-          // Kalau data worker udah ada, update nomor DANA nya
           workerRow.set('Nomor DANA', nomorDanaFix);
           await workerRow.save();
         } else {
-          // Kalau belum ada, bikin baris baru dengan saldo 0 dulu
           await sheetFinance.addRow({
             'Worker_ID': userId.toString(),
             'Nama Worker': username,
@@ -113,7 +172,6 @@ export default async function handler(req, res) {
         }
         notifDana = `\n\n📌 **E-Wallet Terdeteksi:** Nomor DANA **${nomorDanaFix}** berhasil dicatat!`;
       } else {
-        // Jika tidak ada nomor valid di caption, cek apakah di database lawas udah pernah daftar
         if (workerRow && workerRow.get('Nomor DANA') && workerRow.get('Nomor DANA') !== '-') {
           nomorDanaFix = workerRow.get('Nomor DANA');
           notifDana = `\n\n📱 *Menggunakan nomor DANA terdaftar: ${nomorDanaFix}*`;
@@ -122,10 +180,8 @@ export default async function handler(req, res) {
         }
       }
 
-      // Kirim konfirmasi ke Worker
       await sendTelegramMsg(chatId, `✅ **BUKTI DITERIMA!**\n\nSetoran lu udah masuk ke meja "Mata Dewa". Tunggu notifikasi lulus/gagalnya di sini.${notifDana}`);
 
-      // Kirim ke Dashboard Validasi Admin
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -147,42 +203,8 @@ export default async function handler(req, res) {
       return res.status(200).send('OK');
     }
 
-    availableRow.set('Status', 'Diambil');
-        availableRow.set('Worker_ID', userId);
-        await availableRow.save(); // 1. Save data baris pertama
-
-        // 🔥 PATCH: Ambil ulang data baris terbaru dari Sheets buat ngatasin DELAY SYNC
-        const updatedRows = await sheetScript.getRows();
-        
-        // Hitung sisa kuota yang BENERAN masih "Tersedia" saat ini
-        const sisaRows = updatedRows.filter(r => r.get('ID Order') === orderId && r.get('Status') === 'Tersedia');
-        const sisaKuota = sisaRows.length; // Gak perlu dikurang 1 lagi karena datanya udah terupdate riil!
-
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ callback_query_id: callbackId, text: "Berhasil dapat kuota! Cek DM Bot sekarang.", show_alert: true })
-        });
-
-        await sendTelegramMsg(userId, `🔥 **Tugas Diterima!**\n\nTugas Komentar Lo: \n_"${scriptText}"_ \n(Script ID: ${scriptId})\n\nBalas pesan ini dengan SCREENSHOT bukti komen lo!\n\nJangan lupa daftarin nomor DANA lu ketik: \n\`/setdana [NOMOR_HP]\``);
-
-        // Tombol berubah HABIS cuma kalau sisaKuota beneran 0
-        const buttonText = sisaKuota > 0 ? `[ AMBIL TUGAS | Sisa Kuota: ${sisaKuota} ]` : `[ TUGAS HABIS ❌ ]`;
-        
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageReplyMarkup`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: chatGroupId,
-            message_id: msgId,
-            reply_markup: {
-              inline_keyboard: [[ { text: buttonText, callback_data: sisaKuota > 0 ? `claim_${orderId}` : `habis` } ]]
-            }
-          })
-        });
-
     // ---------------------------------------------------------
-    // TAHAP 5: VALIDASI (Klik Approve/Reject) -> Butuh buka Sheets
+    // TAHAP 5: VALIDASI (Klik Approve/Reject)
     // ---------------------------------------------------------
     if (body.callback_query && (body.callback_query.data.startsWith('approve_') || body.callback_query.data.startsWith('reject_'))) {
       const callback = body.callback_query;
@@ -195,19 +217,25 @@ export default async function handler(req, res) {
       const workerName = parts[2] || 'Worker';
 
       if (action === 'approve') {
-        await doc.loadInfo(); // Panggil Sheets HANYA SAAT DIBUTUHKAN
-
+        await doc.loadInfo(); 
         const sheetFinance = doc.sheetsByTitle["Finance & Payout"];
-        if (sheetFinance) {
+        const rows = await sheetFinance.getRows();
+
+        let workerRow = rows.find(r => r.get('Worker_ID') === workerId);
+
+        if (workerRow) {
+          const saldoSekarang = parseInt(workerRow.get('Total Saldo') || 0);
+          workerRow.set('Total Saldo', saldoSekarang + 1500);
+          await workerRow.save();
+        } else {
           await sheetFinance.addRow({
             'Worker_ID': workerId,
             'Nama Worker': workerName,
-            'Bank/E-Wallet': '-',
-            'Nomor Rekening/HP': '-',
             'Total Saldo': 1500,
-            'Status Pencairan': 'Belum'
+            'Nomor DANA': '-'
           });
         }
+
         await sendTelegramMsg(workerId, `🎉 **TUGAS LULUS!**\n\nKerja bagus bos! Saldo lo nambah **+Rp 1.500**. Terus pantau The Barracks buat tugas selanjutnya.`);
         await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageCaption`, {
           method: 'POST',
