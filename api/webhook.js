@@ -167,7 +167,8 @@ export default async function handler(req, res) {
             'Worker_ID': userId.toString(),
             'Nama Worker': username,
             'Total Saldo': 0,
-            'Nomor DANA': nomorDanaFix
+            'Nomor DANA': nomorDanaFix,
+            'Status Pencairan': 'Belum' // 🔥 SUDAH DITAMBAHKAN
           });
         }
         notifDana = `\n\n📌 **E-Wallet Terdeteksi:** Nomor DANA **${nomorDanaFix}** berhasil dicatat!`;
@@ -232,7 +233,8 @@ export default async function handler(req, res) {
             'Worker_ID': workerId,
             'Nama Worker': workerName,
             'Total Saldo': 1500,
-            'Nomor DANA': '-'
+            'Nomor DANA': '-',
+            'Status Pencairan': 'Belum' // 🔥 SUDAH DITAMBAHKAN
           });
         }
 
